@@ -6,12 +6,8 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="HCHSP Enrollment (Unstyled • No Totals)", layout="centered")
-st.title("HCHSP Enrollment (Unstyled • No Totals)")
-st.caption("Upload **VF_Average_Funded_Enrollment_Level.xlsx** and **25–26 Applied/Accepted.xlsx**. "
-           "This outputs ONE Excel (no styling) with columns: Center, Room#/Age/Lang, Funded, Enrolled, "
-           "Applied, Accepted, Lacking/Overage, Waitlist, % Enrolled of Funded. "
-           "No totals rows are included. Applied/Accepted/Lacking/Waitlist are filled per CENTER on every class row, "
-           "following your original conditions. File name: **PBIenrollment.xlsx**.")
+st.title("HCHSP Enrollment (Unstyled)")
+st.caption("For PowerBi.")
 
 # ===== Helpers =====
 DASH_CLASS = r"[-‐-‒–—]"
