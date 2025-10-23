@@ -1,82 +1,29 @@
-import re
 from pathlib import Path
-from datetime import datetime
-from zoneinfo import ZoneInfo
-import os
 
+# Fix docstring indentation by removing inline block comment that caused IndentationError
+app_code = r"""# app.py
+import re
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="HCHSP Enrollment (Unstyled • No Totals)", layout="centered")
 st.title("HCHSP Enrollment (Unstyled • No Totals)")
-st.caption("Upload the VF Average Funded Enrollment report and the 25–26 Applied/Accepted report. "
-           "This outputs a single Excel file with the same data and columns as your original app, "
-           "but WITHOUT totals rows and WITHOUT styling, saved straight to OneDrive.")
+st.caption("Upload **VF_Average_Funded_Enrollment_Level.xlsx** and **25-26 Applied/Accepted.xlsx**. "
+           "Outputs ONE Excel with the same data as your formatted version, but **no totals** and "
+           "**without 'Lic Cap.' or 'Comments'**. It also includes Applied, Accepted, Lacking/Overage, and Waitlist.")
 
-# ----------------------------
-# Inputs
-# ----------------------------
-vf_file = st.file_uploader("Upload *VF_Average_Funded_Enrollment_Level.xlsx*", type=["xlsx"], key="vf")
-aa_file = st.file_uploader("Upload *25-26 Applied/Accepted.xlsx*", type=["xlsx"], key="aa")
-process  = st.button("Process & Save to OneDrive")
+# ===== OneDrive save location (hard-coded) =====
+ONEDRIVE_FOLDER = r"C:\Users\Daniella.Thompson\OneDrive - hchsp.org\Power Bi Data"
+os.makedirs(ONEDRIVE_FOLDER, exist_ok=True)
 
-# ----------------------------
-# OneDrive path (hard-coded)
-# ----------------------------
-PB_FOLDER = r"C:\Users\Daniella.Thompson\OneDrive - hchsp.org\Power Bi Data"
-os.makedirs(PB_FOLDER, exist_ok=True)
+# ===== Helpers =====
+DASH_CLASS = r"[-‐-‒–—]"
 
-# ----------------------------
-# HARD-CODED LICENSED CAPACITY
-# ----------------------------
-LIC_CAP = {
-    "alvarez": 138, "camarena": 192, "chapa": 154, "edinburg": 232,
-    "edinburg north": 147, "escandon": 131, "farias": 153, "guerra": 144,
-    "guzman": 343, "longoria": 125, "mercedes": 213, "mission": 165,
-    "monte alto": 100, "palacios": 135, "salinas": 90, "sam fordyce": 121,
-    "sam houston": 134, "san carlos": 105, "san juan": 182, "seguin": 150,
-    "singleterry": 130, "thigpen": 136, "wilson": 119
-}
-
-DASH_CLASS = r"[-‐-‒–—]"  # accept ASCII hyphen + Unicode dashes
-
-# ----------------------------
-# Normalization / matching
-# ----------------------------
 def _norm_ws(s: str) -> str:
     return re.sub(r"\s+", " ", str(s)).strip()
 
-def _canonicalize_center(s: str) -> str:
-    if s is None:
-        return ""
-    txt = str(s)
-    txt = re.sub(rf"^\s*HCHSP\s*{DASH_CLASS}{{1,}}\s*", "", txt, flags=re.I)  # strip "HCHSP — "
-    txt = re.sub(r"\([^)]*\)", " ", txt)                                     # remove "(...)"
-    txt = txt.lower()
-    txt = re.sub(r"[^a-z0-9\s]", " ", txt)
-    filler = {"head", "start", "headstart", "hs", "ehs", "center", "campus", "elementary", "school", "program"}
-    tokens = [t for t in txt.split() if t and t not in filler]
-    return " ".join(tokens).strip()
-
-_CANON_TO_OFFICIAL = {_canonicalize_center(k): k for k in LIC_CAP}
-
-def lic_cap_for(center_name: str):
-    if not isinstance(center_name, str):
-        return None
-    canon = _canonicalize_center(center_name)
-    if canon in _CANON_TO_OFFICIAL:
-        return LIC_CAP[_CANON_TO_OFFICIAL[canon]]
-    best_key, best_len = None, 0
-    for canon_k, off in _CANON_TO_OFFICIAL.items():
-        if canon_k in canon or canon in canon_k:
-            if len(canon_k) > best_len:
-                best_key, best_len = off, len(canon_k)
-    return LIC_CAP.get(best_key) if best_key else None
-
-# ----------------------------
-# Helpers (parsing)
-# ----------------------------
 def _first_nonempty_strings(row, max_cols=8):
     vals = []
     for j in range(min(max_cols, row.shape[0])):
@@ -90,11 +37,7 @@ def _first_nonempty_strings(row, max_cols=8):
 
 def _row_has_totals(cells_lower: list[str]) -> bool:
     joined = " | ".join(cells_lower)
-    return (
-        "class totals" in joined
-        or "totals for class" in joined
-        or re.search(r"\bclass\s*total", joined) is not None
-    )
+    return ("class totals" in joined) or ("totals for class" in joined) or (re.search(r"\bclass\s*total", joined) is not None)
 
 def _last_two_numbers(row):
     nums = []
@@ -106,14 +49,8 @@ def _last_two_numbers(row):
         return nums[-2], nums[-1]
     return None, None
 
-# ----------------------------
-# Parsers
-# ----------------------------
+# ===== Parse VF (funded/enrolled by class) =====
 def parse_vf(vf_df_raw: pd.DataFrame) -> pd.DataFrame:
-    # Output columns: Center | Class | Funded | Enrolled | PctRatio
-    # - Accept any dash between 'HCHSP' and center
-    # - Capture FULL class name (incl. parentheses)
-    # - Totals row: Enrolled=col 3, Funded=col 4, Percent ratio=col 6 (fallback to last-two-numbers)
     records = []
     current_center = None
     current_class  = None
@@ -163,7 +100,7 @@ def parse_vf(vf_df_raw: pd.DataFrame) -> pd.DataFrame:
     tidy["Center"] = tidy["Center"].map(_norm_ws)
     return tidy
 
-
+# ===== Parse Applied/Accepted =====
 def parse_applied_accepted(aa_df_raw: pd.DataFrame) -> pd.DataFrame:
     header_row_idx = aa_df_raw.index[aa_df_raw.iloc[:, 0].astype(str).str.startswith("ST: Participant PID", na=False)]
     if len(header_row_idx) == 0:
@@ -191,9 +128,7 @@ def parse_applied_accepted(aa_df_raw: pd.DataFrame) -> pd.DataFrame:
             counts[c] = 0
     return counts[["Accepted", "Applied"]].astype(int).reset_index().rename(columns={center_col: "Center"})
 
-# ----------------------------
-# Builder (same as original, but totals will be dropped after)
-# ----------------------------
+# ===== Build output table =====
 def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
     if "PctRatio" in vf_tidy.columns and vf_tidy["PctRatio"].notna().any():
         vf_tidy["PctInt"] = pd.array((vf_tidy["PctRatio"] * 100).round(0), dtype="Int64")
@@ -213,24 +148,24 @@ def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFr
         accepted_val = int(accepted_by_center.get(center, 0))
         applied_val  = int(applied_by_center.get(center, 0))
 
-        # Center Total row (will be dropped later)
+        # Center Total row (we'll drop later)
         rows.append({
             "Center": f"{center} Total",
             "Room#/Age/Lang": "",
-            "Lic Cap.": lic_cap_for(center),
+            "Lic Cap.": None,
             "Funded": funded_sum, "Enrolled": enrolled_sum,
             "Applied": applied_val, "Accepted": accepted_val,
-            "Lacking/Overage": funded_sum - enrolled_sum, "Waitlist": accepted_val if enrolled_sum >= funded_sum else "",
+            "Lacking/Overage": funded_sum - enrolled_sum,
+            "Waitlist": accepted_val if enrolled_sum >= funded_sum else "",
             "% Enrolled of Funded": pct_total,
             "Comments": ""
         })
 
-        # Class rows
         for _, r in group.iterrows():
             rows.append({
                 "Center": r["Center"],
                 "Room#/Age/Lang": r["Class"],
-                "Lic Cap.": "",
+                "Lic Cap.": None,
                 "Funded": int(r["Funded"]), "Enrolled": int(r["Enrolled"]),
                 "Applied": "", "Accepted": "", "Lacking/Overage": "", "Waitlist": "",
                 "% Enrolled of Funded": int(r["PctInt"]) if pd.notna(r["PctInt"]) else pd.NA,
@@ -239,7 +174,7 @@ def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFr
 
     final = pd.DataFrame(rows)
 
-    # Agency total (will be dropped later)
+    # Agency total (we'll drop later too)
     agency_funded   = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Funded"].sum())
     agency_enrolled = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Enrolled"].sum())
     counts_totals   = counts[["Applied","Accepted"]].sum()
@@ -251,7 +186,7 @@ def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFr
     final = pd.concat([final, pd.DataFrame([{
         "Center": "Agency Total",
         "Room#/Age/Lang": "",
-        "Lic Cap.": "",
+        "Lic Cap.": None,
         "Funded": agency_funded, "Enrolled": agency_enrolled,
         "Applied": agency_applied, "Accepted": agency_accepted,
         "Lacking/Overage": agency_lacking, "Waitlist": "",
@@ -265,34 +200,37 @@ def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFr
     ]]
     return final
 
-# ----------------------------
-# Main
-# ----------------------------
-if process and vf_file and aa_file:
+# ===== UI =====
+vf_up = st.file_uploader("Upload VF_Average_Funded_Enrollment_Level.xlsx", type=["xlsx"], key="vf")
+aa_up = st.file_uploader("Upload 25-26 Applied/Accepted.xlsx", type=["xlsx"], key="aa")
+if st.button("Process & Save to OneDrive"):
+    if not vf_up or not aa_up:
+        st.error("Please upload both files.")
+        st.stop()
     try:
-        vf_raw = pd.read_excel(vf_file, sheet_name=0, header=None)
-        aa_raw = pd.read_excel(aa_file, sheet_name=0, header=None)
+        vf_raw = pd.read_excel(vf_up, sheet_name=0, header=None)
+        aa_raw = pd.read_excel(aa_up, sheet_name=0, header=None)
 
         vf_tidy = parse_vf(vf_raw)
         aa_counts = parse_applied_accepted(aa_raw)
-        final_df_with_totals = build_output_table(vf_tidy, aa_counts)
+        df_full = build_output_table(vf_tidy, aa_counts)
 
-        # Drop ALL totals rows (center totals + agency total)
-        mask_totals = final_df_with_totals["Center"].astype(str).str.endswith(" Total", na=False) | \
-                      final_df_with_totals["Center"].astype(str).eq("Agency Total")
-        final_df = final_df_with_totals[~mask_totals].reset_index(drop=True)
+        # Drop ALL totals rows + drop 'Lic Cap.' and 'Comments'
+        mask_totals = df_full["Center"].astype(str).str.endswith(" Total", na=False) | \
+                      df_full["Center"].astype(str).eq("Agency Total")
+        df = df_full[~mask_totals].reset_index(drop=True)
+        keep_cols = ["Center","Room#/Age/Lang","Funded","Enrolled","Applied","Accepted","Lacking/Overage","Waitlist","% Enrolled of Funded"]
+        df = df[keep_cols]
 
-        # Save ONE unstyled Excel file to OneDrive
         out_name = "HCHSP_Enrollment_Unstyled_NoTotals.xlsx"
-        out_path = os.path.join(PB_FOLDER, out_name)
+        out_path = os.path.join(ONEDRIVE_FOLDER, out_name)
         with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-            final_df.to_excel(writer, index=False, sheet_name="Head Start Enrollment")
+            df.to_excel(writer, index=False, sheet_name="Head Start Enrollment")
 
-        st.success("✅ Saved unstyled Excel (no totals) to OneDrive.")
+        st.success("✅ Saved to OneDrive and ready to download.")
         st.code(out_path)
-        st.dataframe(final_df, use_container_width=True)
+        st.dataframe(df, use_container_width=True)
 
-        # Also return a direct download
         with open(out_path, "rb") as f:
             st.download_button("⬇️ Download HCHSP_Enrollment_Unstyled_NoTotals.xlsx",
                                data=f.read(),
@@ -300,3 +238,15 @@ if process and vf_file and aa_file:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except Exception as e:
         st.error(f"Processing error: {e}")
+"""
+
+reqs = """streamlit>=1.37
+pandas>=2.2
+openpyxl>=3.1
+numpy>=1.26
+"""
+
+Path("/mnt/data/app.py").write_text(app_code)
+Path("/mnt/data/requirements.txt").write_text(reqs)
+
+"/mnt/data fixed: app.py & requirements.txt written successfully"
