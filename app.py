@@ -1,15 +1,17 @@
-
+# app.py
 import io
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="HCHSP Enrollment", layout="centered")
+st.set_page_config(page_title="HCHSP Enrollment (Unstyled • No Totals)", layout="centered")
 st.title("HCHSP Enrollment (Unstyled • No Totals)")
 st.caption("Upload **VF_Average_Funded_Enrollment_Level.xlsx** and **25–26 Applied/Accepted.xlsx**. "
-           "This produces ONE Excel for download with the same data and columns as your formatted version, "
-           "but **no totals rows**, and it **excludes 'Lic Cap.' and 'Comments'**.")
+           "This outputs ONE Excel (no styling) with columns: Center, Room#/Age/Lang, Funded, Enrolled, "
+           "Applied, Accepted, Lacking/Overage, Waitlist, % Enrolled of Funded. "
+           "No totals rows are included. Applied/Accepted/Lacking/Waitlist are filled per CENTER on every class row, "
+           "following your original conditions. File name: **PBIenrollment.xlsx**.")
 
 # ===== Helpers =====
 DASH_CLASS = r"[-‐-‒–—]"
@@ -44,6 +46,7 @@ def _last_two_numbers(row):
 
 # ===== Parse VF (funded/enrolled by class) =====
 def parse_vf(vf_df_raw: pd.DataFrame) -> pd.DataFrame:
+    # Output columns: Center | Class | Funded | Enrolled | PctRatio
     records = []
     current_center = None
     current_class  = None
@@ -121,70 +124,46 @@ def parse_applied_accepted(aa_df_raw: pd.DataFrame) -> pd.DataFrame:
             counts[c] = 0
     return counts[["Accepted", "Applied"]].astype(int).reset_index().rename(columns={center_col: "Center"})
 
-# ===== Build output table (drop Lic Cap./Comments; will drop totals later) =====
-def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
+# ===== Build output table: class rows only, center metrics propagated =====
+def build_output_class_only(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
+    # Compute class-level %
     if "PctRatio" in vf_tidy.columns and vf_tidy["PctRatio"].notna().any():
         vf_tidy["PctInt"] = pd.array((vf_tidy["PctRatio"] * 100).round(0), dtype="Int64")
     else:
         pct = (vf_tidy["Enrolled"] * 100).div(pd.Series(vf_tidy["Funded"]).replace(0, np.nan))
         vf_tidy["PctInt"] = pd.array(pct.round(0), dtype="Int64")
 
+    # Center-level stats
     merged = vf_tidy.merge(counts, on="Center", how="left").fillna({"Accepted": 0, "Applied": 0})
-    applied_by_center  = merged.groupby("Center")["Applied"].max()
-    accepted_by_center = merged.groupby("Center")["Accepted"].max()
+    center_agg = merged.groupby("Center", as_index=False).agg(
+        Funded_Sum=("Funded", "sum"),
+        Enrolled_Sum=("Enrolled", "sum"),
+        Applied=("Applied", "max"),
+        Accepted=("Accepted", "max"),
+    )
+    center_agg["Lacking_Overage"] = center_agg["Funded_Sum"] - center_agg["Enrolled_Sum"]
+    center_agg["Waitlist"] = np.where(
+        (center_agg["Funded_Sum"] > 0) & (center_agg["Enrolled_Sum"] >= center_agg["Funded_Sum"]),
+        center_agg["Accepted"],
+        ""
+    )
 
-    rows = []
-    for center, group in merged.groupby("Center", sort=True):
-        funded_sum   = int(group["Funded"].sum())
-        enrolled_sum = int(group["Enrolled"].sum())
-        pct_total    = int(round(enrolled_sum / funded_sum * 100, 0)) if funded_sum > 0 else pd.NA
-        accepted_val = int(accepted_by_center.get(center, 0))
-        applied_val  = int(applied_by_center.get(center, 0))
+    # Join center metrics back to each class row
+    out = vf_tidy.merge(center_agg, on="Center", how="left")
 
-        # Center Total row (we will drop after build)
-        rows.append({
-            "Center": f"{center} Total",
-            "Room#/Age/Lang": "",
-            "Funded": funded_sum, "Enrolled": enrolled_sum,
-            "Applied": applied_val, "Accepted": accepted_val,
-            "Lacking/Overage": funded_sum - enrolled_sum,
-            "Waitlist": accepted_val if enrolled_sum >= funded_sum else "",
-            "% Enrolled of Funded": pct_total
-        })
+    # Build final class-only rows
+    final = pd.DataFrame({
+        "Center": out["Center"],
+        "Room#/Age/Lang": out["Class"],
+        "Funded": out["Funded"].astype(int),
+        "Enrolled": out["Enrolled"].astype(int),
+        "Applied": out["Applied"].fillna(0).astype(int),
+        "Accepted": out["Accepted"].fillna(0).astype(int),
+        "Lacking/Overage": out["Lacking_Overage"].astype(int),
+        "Waitlist": out["Waitlist"],
+        "% Enrolled of Funded": out["PctInt"].astype("Int64")
+    })
 
-        # Class rows
-        for _, r in group.iterrows():
-            rows.append({
-                "Center": r["Center"],
-                "Room#/Age/Lang": r["Class"],
-                "Funded": int(r["Funded"]), "Enrolled": int(r["Enrolled"]),
-                "Applied": "", "Accepted": "", "Lacking/Overage": "", "Waitlist": "",
-                "% Enrolled of Funded": int(r["PctInt"]) if pd.notna(r["PctInt"]) else pd.NA
-            })
-
-    final = pd.DataFrame(rows)
-
-    # Agency Total row (will be dropped later)
-    agency_funded   = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Funded"].sum())
-    agency_enrolled = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Enrolled"].sum())
-    counts_totals   = counts[["Applied","Accepted"]].sum()
-    agency_applied  = int(counts_totals["Applied"])
-    agency_accepted = int(counts_totals["Accepted"])
-    agency_pct      = int(round(agency_enrolled / agency_funded * 100, 0)) if agency_funded > 0 else pd.NA
-
-    final = pd.concat([final, pd.DataFrame([{
-        "Center": "Agency Total",
-        "Room#/Age/Lang": "",
-        "Funded": agency_funded, "Enrolled": agency_enrolled,
-        "Applied": agency_applied, "Accepted": agency_accepted,
-        "Lacking/Overage": agency_funded - agency_enrolled, "Waitlist": "",
-        "% Enrolled of Funded": agency_pct
-    }])], ignore_index=True)
-
-    final = final[[
-        "Center","Room#/Age/Lang","Funded","Enrolled","Applied","Accepted",
-        "Lacking/Overage","Waitlist","% Enrolled of Funded"
-    ]]
     return final
 
 # ===== UI =====
@@ -200,24 +179,19 @@ if st.button("Process & Download"):
 
         vf_tidy = parse_vf(vf_raw)
         aa_counts = parse_applied_accepted(aa_raw)
-        df_full = build_output_table(vf_tidy, aa_counts)
-
-        # Drop ALL totals rows (center totals + agency total)
-        mask_totals = df_full["Center"].astype(str).str.endswith(" Total", na=False) | \
-                      df_full["Center"].astype(str).eq("Agency Total")
-        df = df_full[~mask_totals].reset_index(drop=True)
+        df = build_output_class_only(vf_tidy, aa_counts)
 
         # Preview
         st.dataframe(df, use_container_width=True)
 
         # Build Excel in memory for download
-        out_name = "HCHSP_Enrollment_Unstyled_NoTotals.xlsx"
+        out_name = "PBIenrollment.xlsx"
         excel_buf = io.BytesIO()
         with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Head Start Enrollment")
         excel_buf.seek(0)
         st.download_button(
-            "⬇️ Download HCHSP_Enrollment_Unstyled_NoTotals.xlsx",
+            "⬇️ Download PBIenrollment.xlsx",
             data=excel_buf.getvalue(),
             file_name=out_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
