@@ -1,7 +1,5 @@
 from pathlib import Path
 
-# Fix docstring indentation by removing inline block comment that caused IndentationError
-app_code = r"""# app.py
 import re
 import os
 import numpy as np
