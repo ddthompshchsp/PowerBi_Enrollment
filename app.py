@@ -1,11 +1,11 @@
-# app.py
+
 import io
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="HCHSP Enrollment (Unstyled • No Totals)", layout="centered")
+st.set_page_config(page_title="HCHSP Enrollment", layout="centered")
 st.title("HCHSP Enrollment (Unstyled • No Totals)")
 st.caption("Upload **VF_Average_Funded_Enrollment_Level.xlsx** and **25–26 Applied/Accepted.xlsx**. "
            "This produces ONE Excel for download with the same data and columns as your formatted version, "
