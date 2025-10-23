@@ -1,335 +1,302 @@
+import re
 from pathlib import Path
-
-app_code = r"""# app.py
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
-import os, re
+import os
+
+import numpy as np
 import pandas as pd
 import streamlit as st
-from openpyxl.utils.datetime import from_excel  # Excel serials -> datetime
 
-st.set_page_config(page_title="Power BI Enrollment — One Clean File (Unstyled)", layout="centered")
-st.title("Power BI Enrollment — One Clean File (Unstyled)")
-st.caption("Upload the same two **original** files you use today: "
-           "(1) Participant export (has PID) and (2) Funded vs Enrolled (no PID). "
-           "You'll get **one Excel file** with the same data and sheets as your formatted version, "
-           "but **no styles** and **no totals**, saved to OneDrive.")
+st.set_page_config(page_title="HCHSP Enrollment (Unstyled • No Totals)", layout="centered")
+st.title("HCHSP Enrollment (Unstyled • No Totals)")
+st.caption("Upload the VF Average Funded Enrollment report and the 25–26 Applied/Accepted report. "
+           "This outputs a single Excel file with the same data and columns as your original app, "
+           "but WITHOUT totals rows and WITHOUT styling, saved straight to OneDrive.")
 
-# -------- OneDrive target --------
+# ----------------------------
+# Inputs
+# ----------------------------
+vf_file = st.file_uploader("Upload *VF_Average_Funded_Enrollment_Level.xlsx*", type=["xlsx"], key="vf")
+aa_file = st.file_uploader("Upload *25-26 Applied/Accepted.xlsx*", type=["xlsx"], key="aa")
+process  = st.button("Process & Save to OneDrive")
+
+# ----------------------------
+# OneDrive path (hard-coded)
+# ----------------------------
 PB_FOLDER = r"C:\Users\Daniella.Thompson\OneDrive - hchsp.org\Power Bi Data"
 os.makedirs(PB_FOLDER, exist_ok=True)
 
-# -------- Utilities (matches your original logic) --------
-def coerce_to_dt(v):
-    if pd.isna(v):
+# ----------------------------
+# HARD-CODED LICENSED CAPACITY
+# ----------------------------
+LIC_CAP = {
+    "alvarez": 138, "camarena": 192, "chapa": 154, "edinburg": 232,
+    "edinburg north": 147, "escandon": 131, "farias": 153, "guerra": 144,
+    "guzman": 343, "longoria": 125, "mercedes": 213, "mission": 165,
+    "monte alto": 100, "palacios": 135, "salinas": 90, "sam fordyce": 121,
+    "sam houston": 134, "san carlos": 105, "san juan": 182, "seguin": 150,
+    "singleterry": 130, "thigpen": 136, "wilson": 119
+}
+
+DASH_CLASS = r"[-‐-‒–—]"  # accept ASCII hyphen + Unicode dashes
+
+# ----------------------------
+# Normalization / matching
+# ----------------------------
+def _norm_ws(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s)).strip()
+
+def _canonicalize_center(s: str) -> str:
+    if s is None:
+        return ""
+    txt = str(s)
+    txt = re.sub(rf"^\s*HCHSP\s*{DASH_CLASS}{{1,}}\s*", "", txt, flags=re.I)  # strip "HCHSP — "
+    txt = re.sub(r"\([^)]*\)", " ", txt)                                     # remove "(...)"
+    txt = txt.lower()
+    txt = re.sub(r"[^a-z0-9\s]", " ", txt)
+    filler = {"head", "start", "headstart", "hs", "ehs", "center", "campus", "elementary", "school", "program"}
+    tokens = [t for t in txt.split() if t and t not in filler]
+    return " ".join(tokens).strip()
+
+_CANON_TO_OFFICIAL = {_canonicalize_center(k): k for k in LIC_CAP}
+
+def lic_cap_for(center_name: str):
+    if not isinstance(center_name, str):
         return None
-    if isinstance(v, datetime):
-        return v
-    if isinstance(v, date):
-        return datetime(v.year, v.month, v.day)
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        try:
-            return from_excel(v)
-        except Exception:
-            return None
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s, fmt)
-            except Exception:
-                continue
-    return None
+    canon = _canonicalize_center(center_name)
+    if canon in _CANON_TO_OFFICIAL:
+        return LIC_CAP[_CANON_TO_OFFICIAL[canon]]
+    best_key, best_len = None, 0
+    for canon_k, off in _CANON_TO_OFFICIAL.items():
+        if canon_k in canon or canon in canon_k:
+            if len(canon_k) > best_len:
+                best_key, best_len = off, len(canon_k)
+    return LIC_CAP.get(best_key) if best_key else None
 
-def most_recent(series):
-    dates, texts = [], []
-    for v in pd.unique(series.dropna()):
-        dt = coerce_to_dt(v)
-        if dt:
-            dates.append(dt)
-        else:
-            s = str(v).strip()
-            if s:
-                texts.append(s)
-    if dates:
-        return max(dates)
-    return texts[0] if texts else None
-
-def normalize(s: str) -> str:
-    s = s.lower() if isinstance(s, str) else str(s).lower()
-    s = re.sub(r"[\s\-\–\—_:()]+", " ", s)
-    return s.strip()
-
-def find_cols(cols, keywords):
-    out = []
-    for c in cols:
-        if not isinstance(c, str):
-            continue
-        n = normalize(c)
-        if any(k in n for k in keywords):
-            out.append(c)
-    return out
-
-def collapse_row_values(row, col_names):
+# ----------------------------
+# Helpers (parsing)
+# ----------------------------
+def _first_nonempty_strings(row, max_cols=8):
     vals = []
-    for c in col_names:
-        if c in row and pd.notna(row[c]) and str(row[c]).strip() != "":
-            vals.append(row[c])
-    if not vals:
-        return None
-    dts = [coerce_to_dt(v) for v in vals]
-    dts = [d for d in dts if d]
-    if dts:
-        return max(dts)
-    return str(vals[0]).strip()
+    for j in range(min(max_cols, row.shape[0])):
+        v = row.iloc[j]
+        if pd.isna(v):
+            continue
+        s = str(v).strip()
+        if s:
+            vals.append(s)
+    return vals
 
-# -------- Participant processing (same rules; no styles/totals) --------
-GENERAL_CUTOFF = datetime(2025, 5, 11)
-FIELD_CUTOFF   = datetime(2025, 8, 1)
+def _row_has_totals(cells_lower: list[str]) -> bool:
+    joined = " | ".join(cells_lower)
+    return (
+        "class totals" in joined
+        or "totals for class" in joined
+        or re.search(r"\bclass\s*total", joined) is not None
+    )
 
-METRIC_COLS = ["Immunizations", "TB Test", "Lead Test", "Child's Special Care Needs"]
+def _last_two_numbers(row):
+    nums = []
+    for v in row:
+        x = pd.to_numeric(v, errors="coerce")
+        if pd.notna(x):
+            nums.append(float(x))
+    if len(nums) >= 2:
+        return nums[-2], nums[-1]
+    return None, None
 
-def detect_header_row(file, landmark_terms=("ST: Participant PID","Participant PID","PID")):
-    tmp = pd.read_excel(file, header=None, nrows=120)
-    header_row = None
-    for r in range(tmp.shape[0]):
-        row_vals = tmp.iloc[r].astype(str).fillna("")
-        row_text = " | ".join(row_vals)
-        if any(term.lower() in row_text.lower() for term in landmark_terms):
-            header_row = r
-            break
-    file.seek(0)
-    return header_row
+# ----------------------------
+# Parsers
+# ----------------------------
+def parse_vf(vf_df_raw: pd.DataFrame) -> pd.DataFrame:
+    # Output columns: Center | Class | Funded | Enrolled | PctRatio
+    # - Accept any dash between 'HCHSP' and center
+    # - Capture FULL class name (incl. parentheses)
+    # - Totals row: Enrolled=col 3, Funded=col 4, Percent ratio=col 6 (fallback to last-two-numbers)
+    records = []
+    current_center = None
+    current_class  = None
 
-def read_participant(file):
-    hdr = detect_header_row(file)
-    if hdr is None:
-        return None
-    df = pd.read_excel(file, header=hdr)
-    df.columns = [c.replace("ST: ", "") if isinstance(c, str) else c for c in df.columns]
-    pid_col = None
-    for c in df.columns:
-        if isinstance(c, str) and "pid" in c.lower():
-            pid_col = c
-            break
-    if pid_col is None:
-        return None
-    if pid_col != "Participant PID":
-        df = df.rename(columns={pid_col: "Participant PID"})
-    df = df.dropna(subset=["Participant PID"])
-    return df
+    re_center = re.compile(rf"^\s*HCHSP\s*{DASH_CLASS}{{1,}}\s*(.+)$", re.I)
+    re_class  = re.compile(r"^\s*Class\s+(?!Totals:)(.+?)\s*$", re.I)  # avoid "Class Totals:"
 
-def clean_participants_like_original(df):
-    # collapse to most recent per PID
-    df = df.groupby("Participant PID", as_index=False).agg(most_recent)
-    all_cols = list(df.columns)
+    for i in range(len(vf_df_raw)):
+        row = vf_df_raw.iloc[i, :]
+        cells = _first_nonempty_strings(row, max_cols=8)
+        if not cells:
+            continue
 
-    immun_cols = find_cols(all_cols, ["immun"])
-    tb_cols    = find_cols(all_cols, ["tb","tuberc","ppd"])
-    lead_cols  = find_cols(all_cols, ["lead","pb"])
-    scn_en_cols = find_cols(all_cols, ["special care needs english"])
-    scn_es_cols = find_cols(all_cols, ["special care needs spanish"])
-    scn_cols = scn_en_cols + scn_es_cols
+        first = cells[0]
+        lower_cells = [c.lower() for c in cells]
 
-    if immun_cols:
-        df["Immunizations"] = df.apply(lambda r: collapse_row_values(r, immun_cols), axis=1)
-        df.drop(columns=[c for c in immun_cols if c in df.columns], inplace=True)
-    if tb_cols:
-        df["TB Test"] = df.apply(lambda r: collapse_row_values(r, tb_cols), axis=1)
-        df.drop(columns=[c for c in tb_cols if c in df.columns], inplace=True)
-    if lead_cols:
-        df["Lead Test"] = df.apply(lambda r: collapse_row_values(r, lead_cols), axis=1)
-        df.drop(columns=[c for c in lead_cols if c in df.columns], inplace=True)
-    if scn_cols:
-        df["Child's Special Care Needs"] = df.apply(lambda r: collapse_row_values(r, scn_cols), axis=1)
-        df.drop(columns=[c for c in scn_cols if c in df.columns], inplace=True)
+        m_center = re_center.match(first)
+        if m_center:
+            current_center = _norm_ws(m_center.group(1))
+            continue
 
-    special_date_cols = set([c for c in METRIC_COLS if c in df.columns])
+        if _row_has_totals(lower_cells) and current_center and current_class:
+            enrolled = pd.to_numeric(row.iloc[3], errors="coerce")
+            funded   = pd.to_numeric(row.iloc[4], errors="coerce")
+            pct_ratio= pd.to_numeric(row.iloc[6], errors="coerce")  # ratio (1.00, 1.12, ...)
+            if pd.isna(enrolled) or pd.isna(funded):
+                e, f = _last_two_numbers(row)
+                enrolled = e if e is not None else enrolled
+                funded   = f if f is not None else funded
+            records.append({
+                "Center": current_center,
+                "Class": f"Class {current_class}",
+                "Funded": 0.0 if pd.isna(funded) else float(funded),
+                "Enrolled": 0.0 if pd.isna(enrolled) else float(enrolled),
+                "PctRatio": None if pd.isna(pct_ratio) else float(pct_ratio),
+            })
+            continue
 
-    def transform_cell(val, colname):
-        if val in (None, "", "nan", "NaT"):
-            return "X"
-        dt = coerce_to_dt(val)
-        if dt:
-            cutoff = FIELD_CUTOFF if colname in special_date_cols else GENERAL_CUTOFF
-            if dt < cutoff:
-                return "X"
-            return dt.date().isoformat()
-        return val
+        m_class = re_class.match(first)
+        if m_class:
+            current_class = m_class.group(1).strip()
+            continue
 
-    for col in df.columns:
-        df[col] = df[col].apply(lambda v, c=col: transform_cell(v, c))
+    tidy = pd.DataFrame(records)
+    if tidy.empty:
+        raise ValueError("Could not parse VF report (check class/center markers and column indices).")
+    tidy["Center"] = tidy["Center"].map(_norm_ws)
+    return tidy
 
-    leading = [c for c in ["Participant PID","Participant Name","Center","Campus","School","Area"] if c in df.columns]
-    metrics = [c for c in METRIC_COLS if c in df.columns]
-    others  = [c for c in df.columns if c not in set(leading + metrics)]
-    df = df[leading + metrics + others]
 
-    # remove any residual total-like rows (shouldn't exist after PID groupby)
-    def row_has_total_text(row):
-        joined = " | ".join([str(x) for x in row.values]).lower()
-        return " total" in joined or joined.startswith("total")
-    df = df[~df.apply(row_has_total_text, axis=1)]
-    return df
+def parse_applied_accepted(aa_df_raw: pd.DataFrame) -> pd.DataFrame:
+    header_row_idx = aa_df_raw.index[aa_df_raw.iloc[:, 0].astype(str).str.startswith("ST: Participant PID", na=False)]
+    if len(header_row_idx) == 0:
+        raise ValueError("Could not find header row in Applied/Accepted report.")
+    header_row_idx = int(header_row_idx[0])
+    headers = aa_df_raw.iloc[header_row_idx].tolist()
+    body = pd.DataFrame(aa_df_raw.iloc[header_row_idx + 1:].values, columns=headers)
 
-def center_summary(df):
-    metrics = [c for c in METRIC_COLS if c in df.columns]
-    name_col = None
-    for c in ["Center","Campus","School","Center/Campus"]:
-        if c in df.columns:
-            name_col = c
-            break
-    if name_col is None:
-        return None
-    def row_complete(row):
-        for c in metrics:
-            v = row.get(c, None)
-            if v is None or str(v).strip().upper() == "X" or str(v).strip() == "":
-                return False
-        return True
-    base = df[[name_col,"Participant PID"] + metrics].copy()
-    base["CompleteFlag"] = base.apply(row_complete, axis=1)
-    grp = base.groupby(name_col, dropna=False).agg(
-        Completed_Students=("CompleteFlag","sum"),
-        Total_Students=("Participant PID","nunique")
-    ).reset_index()
-    grp["Completion_Rate"] = grp["Completed_Students"] / grp["Total_Students"]
-    grp = grp.rename(columns={name_col:"Center/Campus"})
-    return grp
+    center_col = "ST: Center Name"
+    status_col = "ST: Status"
+    date_col = "ST: Status End Date"
 
-def scn_summary(df):
-    if "Child's Special Care Needs" not in df.columns:
-        return None
-    name_col = None
-    for c in ["Center","Campus","School","Center/Campus"]:
-        if c in df.columns:
-            name_col = c
-            break
-    if name_col is None:
-        return None
-    scn_ok = df["Child's Special Care Needs"].astype(str).str.upper() != "X"
-    agg = df.groupby(name_col, dropna=False).agg(
-        Completed_SCN=(scn_ok,"sum"),
-        Total_Students=("Participant PID","nunique")
-    ).reset_index()
-    agg["Remaining"] = agg["Total_Students"] - agg["Completed_SCN"]
-    agg["Completion_Rate"] = (agg["Completed_SCN"] / agg["Total_Students"]).fillna(0)
-    agg = agg.rename(columns={name_col:"Center/Campus"})
-    return agg
+    is_blank_date = body[date_col].isna() | body[date_col].astype(str).str.strip().eq("")
+    body = body[is_blank_date].copy()
+    body[center_col] = (
+        body[center_col]
+        .astype(str)
+        .str.replace(rf"^\s*HCHSP\s*{DASH_CLASS}{{1,}}\s*", "", regex=True)
+        .map(_norm_ws)
+    )
 
-# -------- Funded vs Enrolled parsing (saved as a sheet; no totals; unstyled) --------
-FUND_KEYS = ["funded","fund","slot","capacity"]
-ENR_KEYS  = ["enrolled","enrol","actual","current","served"]
-NAME_KEYS = ["center","campus","school","site","location","center name","campus name"]
-AREA_KEYS = ["area","region"]
+    counts = body.groupby(center_col)[status_col].value_counts().unstack(fill_value=0)
+    for c in ["Accepted", "Applied"]:
+        if c not in counts.columns:
+            counts[c] = 0
+    return counts[["Accepted", "Applied"]].astype(int).reset_index().rename(columns={center_col: "Center"})
 
-def find_cols_soft(cols, keys):
-    out = []
-    for c in cols:
-        n = normalize(c)
-        if any(k in n for k in keys):
-            out.append(c)
-    return out
+# ----------------------------
+# Builder (same as original, but totals will be dropped after)
+# ----------------------------
+def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
+    if "PctRatio" in vf_tidy.columns and vf_tidy["PctRatio"].notna().any():
+        vf_tidy["PctInt"] = pd.array((vf_tidy["PctRatio"] * 100).round(0), dtype="Int64")
+    else:
+        pct = (vf_tidy["Enrolled"] * 100).div(pd.Series(vf_tidy["Funded"]).replace(0, np.nan))
+        vf_tidy["PctInt"] = pd.array(pct.round(0), dtype="Int64")
 
-def read_funded(file):
-    df_raw = pd.read_excel(file, header=None, dtype=object)
-    # find probable header row
-    hdr = None
-    limit = min(60, len(df_raw))
-    for r in range(limit):
-        row = df_raw.iloc[r].astype(str).fillna("")
-        row_norm = [normalize(x) for x in row]
-        has_name = any(any(k in cell for k in NAME_KEYS) for cell in row_norm)
-        has_fund = any(any(k in cell for k in FUND_KEYS) for cell in row_norm)
-        has_enr  = any(any(k in cell for k in ENR_KEYS) for cell in row_norm)
-        if has_name and (has_fund or has_enr):
-            hdr = r
-            break
-    if hdr is None:
-        non_empty_rows = df_raw.apply(lambda r: r.notna().sum(), axis=1)
-        hdr = int(non_empty_rows.idxmax()) if non_empty_rows.max() > 0 else 0
-    headers = df_raw.iloc[hdr].astype(str).tolist()
-    df0 = df_raw.iloc[hdr+1:].reset_index(drop=True)
-    df0.columns = headers
-    df0 = df0.dropna(axis=1, how="all").dropna(how="all")
-    cols = list(df0.columns)
-    name_cols = find_cols_soft(cols, NAME_KEYS)
-    funded_cols = find_cols_soft(cols, FUND_KEYS)
-    enrolled_cols = find_cols_soft(cols, ENR_KEYS)
-    area_cols = find_cols_soft(cols, AREA_KEYS)
-    if not name_cols:
-        return None
-    name_col = name_cols[0]
-    funded_col = funded_cols[0] if funded_cols else None
-    enrolled_col = enrolled_cols[0] if enrolled_cols else None
-    area_col = area_cols[0] if area_cols else None
-    # remove totals
-    df0[name_col] = df0[name_col].astype(str)
-    df0 = df0[~df0[name_col].str.lower().str.contains("total", na=False)]
-    out = pd.DataFrame()
-    out["Center/Campus"] = df0[name_col].astype(str).str.strip()
-    if area_col: out["Area"] = df0[area_col].astype(str).str.strip()
-    if funded_col: out["Funded"] = pd.to_numeric(df0[funded_col], errors="coerce")
-    if enrolled_col: out["Enrolled"] = pd.to_numeric(df0[enrolled_col], errors="coerce")
-    out = out[out["Center/Campus"].str.len() > 0]
-    return out
+    merged = vf_tidy.merge(counts, on="Center", how="left").fillna({"Accepted": 0, "Applied": 0})
+    applied_by_center  = merged.groupby("Center")["Applied"].max()
+    accepted_by_center = merged.groupby("Center")["Accepted"].max()
 
-# -------- UI --------
-st.subheader("Uploads")
-part_file = st.file_uploader("Participant export (.xlsx) — has PID", type=["xlsx"], key="part")
-fund_file = st.file_uploader("Funded vs Enrolled (.xlsx) — no PID", type=["xlsx"], key="fund")
+    rows = []
+    for center, group in merged.groupby("Center", sort=True):
+        funded_sum   = int(group["Funded"].sum())
+        enrolled_sum = int(group["Enrolled"].sum())
+        pct_total    = int(round(enrolled_sum / funded_sum * 100, 0)) if funded_sum > 0 else pd.NA
+        accepted_val = int(accepted_by_center.get(center, 0))
+        applied_val  = int(applied_by_center.get(center, 0))
 
-if st.button("Create One Clean Excel (save to OneDrive)"):
-    if not part_file or not fund_file:
-        st.error("Please upload BOTH the participant export and the funded vs enrolled file.")
-        st.stop()
+        # Center Total row (will be dropped later)
+        rows.append({
+            "Center": f"{center} Total",
+            "Room#/Age/Lang": "",
+            "Lic Cap.": lic_cap_for(center),
+            "Funded": funded_sum, "Enrolled": enrolled_sum,
+            "Applied": applied_val, "Accepted": accepted_val,
+            "Lacking/Overage": funded_sum - enrolled_sum, "Waitlist": accepted_val if enrolled_sum >= funded_sum else "",
+            "% Enrolled of Funded": pct_total,
+            "Comments": ""
+        })
 
-    # participants
-    df_part_raw = read_participant(part_file)
-    if df_part_raw is None:
-        st.error("Could not detect a Participant PID column in the participant file.")
-        st.stop()
-    df_part = clean_participants_like_original(df_part_raw)
+        # Class rows
+        for _, r in group.iterrows():
+            rows.append({
+                "Center": r["Center"],
+                "Room#/Age/Lang": r["Class"],
+                "Lic Cap.": "",
+                "Funded": int(r["Funded"]), "Enrolled": int(r["Enrolled"]),
+                "Applied": "", "Accepted": "", "Lacking/Overage": "", "Waitlist": "",
+                "% Enrolled of Funded": int(r["PctInt"]) if pd.notna(r["PctInt"]) else pd.NA,
+                "Comments": ""
+            })
 
-    # funded
-    df_fund = read_funded(fund_file)
-    if df_fund is None:
-        st.error("Could not detect Funded/Enrolled and Center/Campus headers in the funded file.")
-        st.stop()
+    final = pd.DataFrame(rows)
 
-    # summaries like your original (no styles, no totals)
-    df_center = center_summary(df_part)
-    df_scn    = scn_summary(df_part)
+    # Agency total (will be dropped later)
+    agency_funded   = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Funded"].sum())
+    agency_enrolled = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Enrolled"].sum())
+    counts_totals   = counts[["Applied","Accepted"]].sum()
+    agency_applied  = int(counts_totals["Applied"])
+    agency_accepted = int(counts_totals["Accepted"])
+    agency_pct      = int(round(agency_enrolled / agency_funded * 100, 0)) if agency_funded > 0 else pd.NA
+    agency_lacking  = agency_funded - agency_enrolled
 
-    # one Excel file, multiple sheets, unstyled
-    out_name = "PowerBI_Enrollment_Unstyled.xlsx"
-    out_path = os.path.join(PB_FOLDER, out_name)
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        df_part.to_excel(writer, index=False, sheet_name="Main")
-        if df_center is not None:
-            df_center.to_excel(writer, index=False, sheet_name="Center Summary")
-        if df_scn is not None:
-            df_scn.to_excel(writer, index=False, sheet_name="Child's Special Care Needs Summary")
-        # include funded sheet for completeness
-        df_fund.to_excel(writer, index=False, sheet_name="Funded (raw)")
+    final = pd.concat([final, pd.DataFrame([{
+        "Center": "Agency Total",
+        "Room#/Age/Lang": "",
+        "Lic Cap.": "",
+        "Funded": agency_funded, "Enrolled": agency_enrolled,
+        "Applied": agency_applied, "Accepted": agency_accepted,
+        "Lacking/Overage": agency_lacking, "Waitlist": "",
+        "% Enrolled of Funded": agency_pct,
+        "Comments": ""
+    }])], ignore_index=True)
 
-    st.success("✅ One clean Excel (no styling, no totals) saved to OneDrive.")
-    st.code(out_path)
-    # also allow direct download
-    with open(out_path, "rb") as f:
-        st.download_button("⬇️ Download PowerBI_Enrollment_Unstyled.xlsx", data=f.read(), file_name=out_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-"""
+    final = final[[
+        "Center","Room#/Age/Lang","Lic Cap.","Funded","Enrolled",
+        "Applied","Accepted","Lacking/Overage","Waitlist","% Enrolled of Funded","Comments"
+    ]]
+    return final
 
-reqs = """streamlit>=1.37
-pandas>=2.2
-openpyxl>=3.1
-pillow>=10.3
-tzdata>=2024.1
-"""
+# ----------------------------
+# Main
+# ----------------------------
+if process and vf_file and aa_file:
+    try:
+        vf_raw = pd.read_excel(vf_file, sheet_name=0, header=None)
+        aa_raw = pd.read_excel(aa_file, sheet_name=0, header=None)
 
-Path("/mnt/data/app.py").write_text(app_code)
-Path("/mnt/data/requirements.txt").write_text(reqs)
+        vf_tidy = parse_vf(vf_raw)
+        aa_counts = parse_applied_accepted(aa_raw)
+        final_df_with_totals = build_output_table(vf_tidy, aa_counts)
 
-"/mnt/data app.py and requirements.txt written (single Excel output, unstyled, no totals)"
+        # Drop ALL totals rows (center totals + agency total)
+        mask_totals = final_df_with_totals["Center"].astype(str).str.endswith(" Total", na=False) | \
+                      final_df_with_totals["Center"].astype(str).eq("Agency Total")
+        final_df = final_df_with_totals[~mask_totals].reset_index(drop=True)
+
+        # Save ONE unstyled Excel file to OneDrive
+        out_name = "HCHSP_Enrollment_Unstyled_NoTotals.xlsx"
+        out_path = os.path.join(PB_FOLDER, out_name)
+        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+            final_df.to_excel(writer, index=False, sheet_name="Head Start Enrollment")
+
+        st.success("✅ Saved unstyled Excel (no totals) to OneDrive.")
+        st.code(out_path)
+        st.dataframe(final_df, use_container_width=True)
+
+        # Also return a direct download
+        with open(out_path, "rb") as f:
+            st.download_button("⬇️ Download HCHSP_Enrollment_Unstyled_NoTotals.xlsx",
+                               data=f.read(),
+                               file_name=out_name,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except Exception as e:
+        st.error(f"Processing error: {e}")
