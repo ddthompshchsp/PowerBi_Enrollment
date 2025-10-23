@@ -1,5 +1,4 @@
-from pathlib import Path
-
+# app.py
 import re
 import os
 import numpy as np
@@ -9,12 +8,13 @@ import streamlit as st
 st.set_page_config(page_title="HCHSP Enrollment (Unstyled • No Totals)", layout="centered")
 st.title("HCHSP Enrollment (Unstyled • No Totals)")
 st.caption("Upload **VF_Average_Funded_Enrollment_Level.xlsx** and **25-26 Applied/Accepted.xlsx**. "
-           "Outputs ONE Excel with the same data as your formatted version, but **no totals** and "
-           "**without 'Lic Cap.' or 'Comments'**. It also includes Applied, Accepted, Lacking/Overage, and Waitlist.")
+           "Outputs ONE Excel with your required columns (Applied, Accepted, Lacking/Overage, Waitlist, %), "
+           "drops totals rows, and excludes 'Lic Cap.' and 'Comments'. Saves to the folder you specify.")
 
-# ===== OneDrive save location (hard-coded) =====
-ONEDRIVE_FOLDER = r"C:\Users\Daniella.Thompson\OneDrive - hchsp.org\Power Bi Data"
-os.makedirs(ONEDRIVE_FOLDER, exist_ok=True)
+# ===== Choose save location (paste your local OneDrive/SharePoint SYNCED folder path) =====
+default_path = r"C:\Users\Daniella.Thompson\OneDrive - hchsp.org\Power Bi Data"
+save_folder = st.text_input("Save to this local OneDrive/SharePoint folder:", value=default_path)
+st.caption("Tip: In SharePoint/OneDrive web, click **Sync** on that folder, then paste the local path here.")
 
 # ===== Helpers =====
 DASH_CLASS = r"[-‐-‒–—]"
@@ -126,7 +126,7 @@ def parse_applied_accepted(aa_df_raw: pd.DataFrame) -> pd.DataFrame:
             counts[c] = 0
     return counts[["Accepted", "Applied"]].astype(int).reset_index().rename(columns={center_col: "Center"})
 
-# ===== Build output table =====
+# ===== Build output table (no 'Lic Cap.'/'Comments') =====
 def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFrame:
     if "PctRatio" in vf_tidy.columns and vf_tidy["PctRatio"].notna().any():
         vf_tidy["PctInt"] = pd.array((vf_tidy["PctRatio"] * 100).round(0), dtype="Int64")
@@ -146,62 +146,55 @@ def build_output_table(vf_tidy: pd.DataFrame, counts: pd.DataFrame) -> pd.DataFr
         accepted_val = int(accepted_by_center.get(center, 0))
         applied_val  = int(applied_by_center.get(center, 0))
 
-        # Center Total row (we'll drop later)
+        # Center Total (will be dropped later)
         rows.append({
             "Center": f"{center} Total",
             "Room#/Age/Lang": "",
-            "Lic Cap.": None,
             "Funded": funded_sum, "Enrolled": enrolled_sum,
             "Applied": applied_val, "Accepted": accepted_val,
             "Lacking/Overage": funded_sum - enrolled_sum,
             "Waitlist": accepted_val if enrolled_sum >= funded_sum else "",
-            "% Enrolled of Funded": pct_total,
-            "Comments": ""
+            "% Enrolled of Funded": pct_total
         })
 
         for _, r in group.iterrows():
             rows.append({
                 "Center": r["Center"],
                 "Room#/Age/Lang": r["Class"],
-                "Lic Cap.": None,
                 "Funded": int(r["Funded"]), "Enrolled": int(r["Enrolled"]),
                 "Applied": "", "Accepted": "", "Lacking/Overage": "", "Waitlist": "",
-                "% Enrolled of Funded": int(r["PctInt"]) if pd.notna(r["PctInt"]) else pd.NA,
-                "Comments": ""
+                "% Enrolled of Funded": int(r["PctInt"]) if pd.notna(r["PctInt"]) else pd.NA
             })
 
     final = pd.DataFrame(rows)
 
-    # Agency total (we'll drop later too)
+    # Agency total (will be dropped later)
     agency_funded   = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Funded"].sum())
     agency_enrolled = int(final.loc[final["Center"].str.endswith(" Total", na=False), "Enrolled"].sum())
     counts_totals   = counts[["Applied","Accepted"]].sum()
     agency_applied  = int(counts_totals["Applied"])
     agency_accepted = int(counts_totals["Accepted"])
     agency_pct      = int(round(agency_enrolled / agency_funded * 100, 0)) if agency_funded > 0 else pd.NA
-    agency_lacking  = agency_funded - agency_enrolled
 
     final = pd.concat([final, pd.DataFrame([{
         "Center": "Agency Total",
         "Room#/Age/Lang": "",
-        "Lic Cap.": None,
         "Funded": agency_funded, "Enrolled": agency_enrolled,
         "Applied": agency_applied, "Accepted": agency_accepted,
-        "Lacking/Overage": agency_lacking, "Waitlist": "",
-        "% Enrolled of Funded": agency_pct,
-        "Comments": ""
+        "Lacking/Overage": agency_funded - agency_enrolled, "Waitlist": "",
+        "% Enrolled of Funded": agency_pct
     }])], ignore_index=True)
 
     final = final[[
-        "Center","Room#/Age/Lang","Lic Cap.","Funded","Enrolled",
-        "Applied","Accepted","Lacking/Overage","Waitlist","% Enrolled of Funded","Comments"
+        "Center","Room#/Age/Lang","Funded","Enrolled","Applied","Accepted",
+        "Lacking/Overage","Waitlist","% Enrolled of Funded"
     ]]
     return final
 
 # ===== UI =====
 vf_up = st.file_uploader("Upload VF_Average_Funded_Enrollment_Level.xlsx", type=["xlsx"], key="vf")
 aa_up = st.file_uploader("Upload 25-26 Applied/Accepted.xlsx", type=["xlsx"], key="aa")
-if st.button("Process & Save to OneDrive"):
+if st.button("Process & Save"):
     if not vf_up or not aa_up:
         st.error("Please upload both files.")
         st.stop()
@@ -213,38 +206,31 @@ if st.button("Process & Save to OneDrive"):
         aa_counts = parse_applied_accepted(aa_raw)
         df_full = build_output_table(vf_tidy, aa_counts)
 
-        # Drop ALL totals rows + drop 'Lic Cap.' and 'Comments'
+        # Drop ALL totals rows
         mask_totals = df_full["Center"].astype(str).str.endswith(" Total", na=False) | \
                       df_full["Center"].astype(str).eq("Agency Total")
         df = df_full[~mask_totals].reset_index(drop=True)
-        keep_cols = ["Center","Room#/Age/Lang","Funded","Enrolled","Applied","Accepted","Lacking/Overage","Waitlist","% Enrolled of Funded"]
-        df = df[keep_cols]
 
+        # Ensure folder and save
+        try:
+            os.makedirs(save_folder, exist_ok=True)
+        except Exception as e:
+            st.warning(f"Could not create folder '{save_folder}': {e}")
         out_name = "HCHSP_Enrollment_Unstyled_NoTotals.xlsx"
-        out_path = os.path.join(ONEDRIVE_FOLDER, out_name)
-        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Head Start Enrollment")
+        out_path = os.path.join(save_folder, out_name)
+        try:
+            with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Head Start Enrollment")
+            st.success("✅ Saved to your specified OneDrive/SharePoint folder.")
+            st.code(out_path)
+        except Exception as e:
+            st.error(f"Save failed: {e}")
 
-        st.success("✅ Saved to OneDrive and ready to download.")
-        st.code(out_path)
+        # Always give a direct download
         st.dataframe(df, use_container_width=True)
-
-        with open(out_path, "rb") as f:
-            st.download_button("⬇️ Download HCHSP_Enrollment_Unstyled_NoTotals.xlsx",
-                               data=f.read(),
-                               file_name=out_name,
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("⬇️ Download HCHSP_Enrollment_Unstyled_NoTotals.xlsx",
+                           data=df.to_excel(index=False, engine="openpyxl"),
+                           file_name=out_name,
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except Exception as e:
         st.error(f"Processing error: {e}")
-"""
-
-reqs = """streamlit>=1.37
-pandas>=2.2
-openpyxl>=3.1
-numpy>=1.26
-"""
-
-Path("/mnt/data/app.py").write_text(app_code)
-Path("/mnt/data/requirements.txt").write_text(reqs)
-
-"/mnt/data fixed: app.py & requirements.txt written successfully"
